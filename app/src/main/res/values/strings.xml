@@ -1,0 +1,60 @@
+<resources>
+    <string name="app_name">车牌管家</string>
+
+    <!-- Home -->
+    <string name="home_title">车牌管家</string>
+    <string name="home_subtitle">智能识别 · 高效巡场</string>
+    <string name="home_start_scan">开始扫描</string>
+    <string name="home_view_records">查看记录</string>
+
+    <!-- Scanner -->
+    <string name="scanner_title">扫描中</string>
+    <string name="scanner_recognizing">识别中…</string>
+    <string name="scanner_idle">未启动</string>
+    <string name="scanner_placeholder">相机预览占位</string>
+    <string name="scanner_permission_required">需要相机权限才能扫描</string>
+    <string name="scanner_grant_permission">授予相机权限</string>
+    <string name="scanner_recent_label">最近识别</string>
+    <string name="scanner_missing_key_title">尚未配置 API Key</string>
+    <string name="scanner_missing_key_message">请先在「设置」中填入 API Key、选择识别模型,再开始识别。\n相机预览仍可正常查看,但点击开始扫描后不会调用识别接口。</string>
+    <string name="scanner_missing_key_go_settings">去设置</string>
+    <string name="scanner_missing_key_banner">未配置 API Key,识别功能暂不可用</string>
+
+    <!-- Records -->
+    <string name="records_title">已识别记录</string>
+    <string name="records_empty">还没有识别记录</string>
+    <string name="records_export">导出为 Excel</string>
+
+    <!-- Settings -->
+    <string name="settings_title">设置</string>
+    <string name="settings_provider_label">选择识别服务</string>
+    <string name="settings_provider_hint">点选服务卡片可一键填入对应的 Base URL 与模型名,仍可手动修改。</string>
+    <string name="settings_runtime_label">运行时配置</string>
+    <string name="settings_runtime_hint">所有改动即时生效,无需重启 App。</string>
+    <string name="settings_api_key_label">API Key</string>
+    <string name="settings_api_key_hint">请输入识别服务的 API Key</string>
+    <string name="settings_base_url_label">Base URL</string>
+    <string name="settings_model_label">模型名</string>
+    <string name="settings_save">保存</string>
+    <string name="settings_saved">已保存</string>
+    <string name="settings_test_connection">测试连接</string>
+
+    <!-- Common -->
+    <string name="action_back">返回</string>
+    <string name="action_close">关闭</string>
+    <string name="action_open_settings">打开应用设置</string>
+
+    <!-- About -->
+    <string name="about_title">关于</string>
+    <string name="about_creator">创作者</string>
+    <string name="about_creator_name">Mr.Kon</string>
+    <string name="about_version_label">版本</string>
+    <string name="about_version_value">v%1$s</string>
+    <string name="about_app_intro">车牌管家是一款为停车场巡场员量身定制的车牌识别 App,基于 MiniMax 视觉模型实现,支持 4 家主流识别服务,识别结果可一键导出 Excel 报表。</string>
+    <string name="about_features_title">主要功能</string>
+    <string name="about_feature_scan">· 实时识别:相机对准车牌,自动识别</string>
+    <string name="about_feature_confirm">· 自动确认:识别后 30 秒内自动保存</string>
+    <string name="about_feature_dedup">· 去重:5 秒内同一车牌不重复识别</string>
+    <string name="about_feature_export">· 一键导出:Excel 报表含缩略图</string>
+    <string name="about_copyright">© 2026 Mr.Kon 保留所有权利</string>
+</resources>

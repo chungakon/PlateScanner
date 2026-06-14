@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Internal app cache (used for thumbnails and exported xlsx staging) -->
+    <cache-path
+        name="cache"
+        path="." />
+    <files-path
+        name="files"
+        path="." />
+    <!-- Explicit export subfolder so shareable xlsx files can be enumerated
+         independently if a tighter scope is ever required. -->
+    <cache-path
+        name="exports"
+        path="exports/" />
+    <files-path
+        name="plates"
+        path="plates/" />
+
+    <!-- Legacy external storage on API<=28. -->
+    <external-files-path
+        name="ext_files"
+        path="." />
+    <external-cache-path
+        name="ext_cache"
+        path="." />
+</paths>

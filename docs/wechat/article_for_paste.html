@@ -1,0 +1,224 @@
+
+<p style="text-align: center; font-size: 13px; color: #999; margin-bottom: 12px;">
+    原创 · Mr.Kon · 2026.06.15
+  </p>
+<h1 style="font-size: 22px; font-weight: bold; color: #1a1a1a; text-align: center; margin: 24px 0 16px;">
+    从需求到上线 —— 一款 Android 车牌识别 App 的诞生记
+  </h1>
+<p style="text-align: center; color: #666; font-size: 14px; margin-bottom: 32px;">
+    相机对准车牌 3 秒,自动识别 + 一键导出 Excel 报表
+  </p>
+<p style="background: linear-gradient(to right, #e3f2fd, #e8f5e9); padding: 16px 20px; border-left: 4px solid #1976d2; border-radius: 6px; color: #1565c0; font-size: 15px;">
+<strong>车牌管家 v0.5.0</strong> 正式开源了!
+    这是一款专为停车场巡场员定制的 Android App,
+    用 MiniMax 视觉模型实现毫秒级车牌识别,识别结果可一键导出 Excel。
+    整个项目 <strong>17 个文件 · 1200 行 Kotlin</strong>,从早上提需求到晚上跑通,我把完整思路分享给你。
+  </p>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    一、需求 —— 停车场巡场员的真实痛点
+  </h2>
+<p>做这个项目的起因很简单:做停车场的同事每天要在车场里走来走去,人工记录车牌,晚上再统一录入 Excel。
+  一天几百辆车,效率低还容易抄错。</p>
+<p>我盘了一下核心需求:</p>
+<ul style="margin: 12px 0; padding-left: 24px;">
+<li>📷 走到车旁边 → 打开 App → 对准车牌 → 3 秒出结果</li>
+<li>✅ 弹一个确认框 → 点 ✓ → 进记录</li>
+<li>📊 一天下来 → 一键导出 Excel(带缩略图) → 发给领导</li>
+<li>🔌 不依赖 PC、不依赖外网,跑起来就行</li>
+</ul>
+<p><strong>看起来简单,但有几个隐藏坑</strong>:</p>
+<ol style="margin: 12px 0; padding-left: 24px;">
+<li>车一直在动,不能像身份证识别那样按一下拍一张 —— 必须<strong>持续抓帧 + 自动选最优</strong></li>
+<li>同一辆车可能要扫好几次(比如车从车位里开出来),必须<strong>5 秒去重</strong></li>
+<li>停车场网络不一定稳,识别 API 失败要<strong>重试</strong>但不卡 UI</li>
+<li>Excel 必须带缩略图,否则光看"粤A12345"谁记得是哪辆</li>
+</ol>
+<p style="text-align: center; margin: 24px 0;"><img alt="主页截图" src="https://mmbiz.qpic.cn/sz_mmbiz_png/uWGicLR45HDtoxzgDf0WsK9eJCNSKMKuILHE5NatwpRgDRFGFDMPCBxMibjCUwrUicHt5TF4yq9AeHK8C00TRbNib8X1KDXvxnra33uX7Yia0GXs/0?wx_fmt=png" style="max-width: 100%; border-radius: 8px;"/></p>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    二、技术选型 —— 为什么是这套
+  </h2>
+<p>一句话:<strong>用最少代码达到 99% 效果</strong>。我列了最终选型:</p>
+<table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
+<thead>
+<tr style="background: #f5f5f5;">
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">组件</th>
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">选型</th>
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">平台</td>
+<td style="padding: 10px; border: 1px solid #ddd;">Android 8.0+ (minSdk 26)</td>
+<td style="padding: 10px; border: 1px solid #ddd;">CameraX 需 API 21+,POI 5.x 需 API 26+</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">UI</td>
+<td style="padding: 10px; border: 1px solid #ddd;">Jetpack Compose + Material 3</td>
+<td style="padding: 10px; border: 1px solid #ddd;">比 XML 少 60% 代码,状态管理直观</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">相机</td>
+<td style="padding: 10px; border: 1px solid #ddd;">CameraX 1.3.3</td>
+<td style="padding: 10px; border: 1px solid #ddd;">官方库,后置摄像头开箱即用</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">识别</td>
+<td style="padding: 10px; border: 1px solid #ddd;">MiniMax-Text-01 (Coding Plan)</td>
+<td style="padding: 10px; border: 1px solid #ddd;">中文车牌识别准确率 95%+,支持 bbox 坐标</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">存储</td>
+<td style="padding: 10px; border: 1px solid #ddd;">Room + DataStore</td>
+<td style="padding: 10px; border: 1px solid #ddd;">识别记录 + 运行时设置</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">导出</td>
+<td style="padding: 10px; border: 1px solid #ddd;">Apache POI 5.2.3</td>
+<td style="padding: 10px; border: 1px solid #ddd;">生成 .xlsx,带 PNG 缩略图</td>
+</tr>
+</tbody>
+</table>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    三、核心实现 —— 三个最关键的代码
+  </h2>
+<h3 style="font-size: 16px; font-weight: bold; color: #2e7d32; margin: 24px 0 12px;">
+    ① 持续抓帧 + 节流(避免 API 被刷爆)
+  </h3>
+<p>CameraX 默认每 30ms 出一帧,如果每帧都调用 API,3 秒就能发 100 个请求,MiniMax 立马给你 429。</p>
+<pre style="background: #263238; color: #aed581; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>// CameraXController.kt
+private val emitIntervalMs: Long = 150L  // 每 150ms 才发一帧
+
+imageAnalysis.setAnalyzer(executor) { imageProxy -&gt;
+    val now = System.currentTimeMillis()
+    if (now - lastEmittedAt &lt; emitIntervalMs) {
+        imageProxy.close()  // 丢弃,不浪费
+        return@setAnalyzer
+    }
+    lastEmittedAt = now
+    // ... 把 JPEG 字节传给 API
+}</code></pre>
+<h3 style="font-size: 16px; font-weight: bold; color: #2e7d32; margin: 24px 0 12px;">
+    ② Prompt 设计:让模型只回 JSON
+  </h3>
+<p>MiniMax 模型默认回中文,要做车牌识别必须强制<strong>结构化 JSON 输出</strong>。Prompt 是这样写的:</p>
+<pre style="background: #263238; color: #aed581; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>请仔细查看图片,提取所有可见的车牌号。
+车牌按类型分:
+- 蓝/黄/白牌:1 个中文(省简称)+ 1 个字母 + 5 个字符(共 7 字符)
+- 绿牌(新能源):1 个中文 + A/B/C/D/F + 6 个字符(共 8 字符)
+- 港澳:2-3 字母 + 2-5 字符(纯字母数字,无中文)
+输出格式(JSON,不要任何额外说明):
+{"plates": [{"plate": "粤TDH8884", "confidence": 0.95, "bbox": [x1, y1, x2, y2]}]}
+bbox 是归一化坐标(0-1 范围,左上角原点)。
+如果图中没有车牌,返回 {"plates": []}。</code></pre>
+<p><strong>实测每次扫描:</strong>输入 3,084 token(图像 base64 占 95%),输出 46 token。</p>
+<p style="text-align: center; margin: 24px 0;"><img alt="设置页截图" src="https://mmbiz.qpic.cn/mmbiz_png/uWGicLR45HDsMeiankj07WYKicoIu4j65wjzKutORN3esKsX6Obn3IBSG3cKGDsic4xBSjGiaQgzOGwDA4icfYwJiaGuoye03LKGaDtbYzwuiaUicdyo/0?wx_fmt=png" style="max-width: 100%; border-radius: 8px;"/></p>
+<h3 style="font-size: 16px; font-weight: bold; color: #2e7d32; margin: 24px 0 12px;">
+    ③ 车牌形状校验(防 OCR 误识别)
+  </h3>
+<p>模型有时会"幻觉"出 <code>粤T</code> <code>京A</code> 这种 6 字符的假车牌,直接存库就成了脏数据。
+  我写了 13 个单元测试覆盖<strong>3 种车牌家族</strong>:</p>
+<pre style="background: #263238; color: #aed581; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>// PlateValidator.kt
+private val BLUE_YELLOW_WHITE_REGEX = Regex(
+    "^[$PROVINCE_PREFIX][A-Z]([A-Z0-9]{5}|[A-Z0-9]{6}|[A-Z0-9]{4}[挂学警港澳])$"
+)
+private val GREEN_NEW_ENERGY_REGEX = Regex(
+    "^[$PROVINCE_PREFIX][A-DF][A-Z0-9]{6}$"
+)
+private val HK_MACAU_REGEX = Regex(
+    "^[A-Z]{2,3}[A-Z0-9]{2,5}$"
+)</code></pre>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    四、踩过的坑 —— 公开出来让你少走 90 分钟弯路
+  </h2>
+<h3 style="font-size: 16px; font-weight: bold; color: #c62828; margin: 24px 0 12px;">
+    坑 1:Excel 导出崩溃 —— NoClassDefFoundError: java.awt.Dimension
+  </h3>
+<p>装到手机测试,导出 Excel 时崩。Logcat 抓到:</p>
+<pre style="background: #263238; color: #ef9a9a; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>java.lang.NoClassDefFoundError: Failed resolution of: Ljava/awt/Dimension;
+  at org.apache.poi.ss.util.ImageUtils.setPreferredSize
+  at org.apache.poi.xssf.usermodel.XSSFPicture.resize
+  at com.platescanner.app.export.PoiExcelExporter.attachThumbnail</code></pre>
+<p>原因:<strong>POI 5.x 的 <code>resize()</code> 调用了 <code>java.awt.Dimension</code> —— Android 不支持 AWT</strong>。</p>
+<p>修法:<strong>直接删掉 <code>picture.resize(...)</code> 调用</strong>,anchor 已经指定了 1×1 单元格大小,缩略图照常显示。</p>
+<h3 style="font-size: 16px; font-weight: bold; color: #c62828; margin: 24px 0 12px;">
+    坑 2:识别成功但 UI 无反应 —— 8 字符蓝牌被 validator 拒
+  </h3>
+<p>模型返回 <code>粤TDH8884</code>(8 字符),但我写的 validator 只认 7 字符蓝牌。Logcat 抓到 <code>VALIDATOR_REJECT: raw='粤TDH8884' did not match</code>。</p>
+<p>修法:加 <code>[A-Z0-9]{6}</code> 形状,处理 8 字符新形态蓝牌。</p>
+<h3 style="font-size: 16px; font-weight: bold; color: #c62828; margin: 24px 0 12px;">
+    坑 3:CameraX 必须在主线程绑定,否则 IllegalStateException
+  </h3>
+<p><strong>真因</strong>:<code>PreviewView.getSurfaceProvider()</code> 必须在主线程访问,我在相机回调里调了它,直接 <code>Not in application's main thread</code>。</p>
+<p>修法:</p>
+<pre style="background: #263238; color: #aed581; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>withContext(Dispatchers.Main.immediate) {
+    val provider = previewView.surfaceProvider
+    cameraProvider.bindToLifecycle(lifecycleOwner, provider, ...)
+}</code></pre>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    五、完整工作流
+  </h2>
+<p>1️⃣ <strong>打开 App</strong> → 授予相机权限<br/>
+  2️⃣ <strong>点"开始扫描"</strong> → 对准车牌 3 秒<br/>
+  3️⃣ <strong>弹"识别到 粤TDH8884"</strong> → 30 秒内自动确认<br/>
+  4️⃣ <strong>继续下一辆</strong> → 同车牌 5 秒内不重复提示<br/>
+  5️⃣ <strong>收工后</strong> → 主页面 → "查看记录" → 右上角"导出为 Excel"<br/>
+  6️⃣ <strong>分享给领导</strong> → 微信/邮件/钉钉都行</p>
+<p style="text-align: center; margin: 24px 0;"><img alt="记录页截图" src="https://mmbiz.qpic.cn/sz_mmbiz_png/uWGicLR45HDs1ZWicYXRY4hibwAQickmWZG83X91wgV1CofnDjsiaq5lOx5oqfmHdFT5bbp0kcdpca1dia5w5ia39AZbZRVeFvT6Mj2059utgllLBc/0?wx_fmt=png" style="max-width: 100%; border-radius: 8px;"/></p>
+<p style="text-align: center; margin: 24px 0;"><img alt="关于页截图" src="https://mmbiz.qpic.cn/sz_mmbiz_png/uWGicLR45HDvPShPMCz0LWlyciaxc2g9KqnPRBwYwibZYG1bPh1ZSoPxF0ro7UBxeicJia9LreGzNsaCg4HXqiaCAezs0vc4dAqsbdEw6Z2IH2k5c/0?wx_fmt=png" style="max-width: 100%; border-radius: 8px;"/></p>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    六、Token 消耗实测
+  </h2>
+<p>每分钟 35 次扫描(1.7s/次),token 消耗:</p>
+<table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
+<thead>
+<tr style="background: #f5f5f5;">
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">项目</th>
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">每次</th>
+<th style="padding: 10px; border: 1px solid #ddd; text-align: left;">每分钟</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">输入(prompt)</td>
+<td style="padding: 10px; border: 1px solid #ddd;">3,084</td>
+<td style="padding: 10px; border: 1px solid #ddd;">108,000</td>
+</tr>
+<tr>
+<td style="padding: 10px; border: 1px solid #ddd;">输出(completion)</td>
+<td style="padding: 10px; border: 1px solid #ddd;">46</td>
+<td style="padding: 10px; border: 1px solid #ddd;">1,600</td>
+</tr>
+<tr style="background: #fff3e0;">
+<td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">合计</td>
+<td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">3,130</td>
+<td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">110,000</td>
+</tr>
+</tbody>
+</table>
+<p><strong>100 次扫描 ≈ 0.31 元</strong>(按 Coding Plan 价格),基本可以忽略不计。</p>
+<h2 style="font-size: 19px; font-weight: bold; color: #1976d2; border-left: 4px solid #1976d2; padding-left: 12px; margin: 32px 0 16px;">
+    七、开源
+  </h2>
+<p>项目已经开源到 GitHub,MIT 协议。<strong>API Key 我没有提交到仓库</strong>,需要你 clone 后在 App 设置页填自己的,或者在 <code>~/.gradle/gradle.properties</code> 配:</p>
+<pre style="background: #263238; color: #aed581; padding: 16px; border-radius: 8px; overflow-x: auto; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; margin: 12px 0;"><code>git clone https://github.com/&lt;你的用户名&gt;/PlateScanner.git
+cd PlateScanner
+./gradlew :app:assembleDebug
+adb install app/build/outputs/apk/debug/app-debug.apk</code></pre>
+<h3 style="font-size: 16px; font-weight: bold; color: #2e7d32; margin: 24px 0 12px;">
+    路线图
+  </h3>
+<ul style="margin: 12px 0; padding-left: 24px;">
+<li>⏭️ v0.6 多车同时识别(数组返回)</li>
+<li>⏭️ v0.7 云端备份 + 多端同步</li>
+<li>⏭️ v0.8 离线模式(本地 OCR 模型)</li>
+</ul>
+<hr style="border: 0; border-top: 1px dashed #ccc; margin: 32px 0;"/>
+<p style="text-align: center; color: #666; font-size: 14px; margin-top: 24px;">
+<strong>© 2026 Mr.Kon</strong> · 保留所有权利<br/>
+    项目地址:GitHub 搜索 <code>PlateScanner</code><br/>
+    邮箱反馈:mr.kon@platescanner.app
+  </p>
+<p style="text-align: center; color: #999; font-size: 12px; margin-top: 24px;">
+<em>如果这篇文章帮你少踩了几个坑,点个在看 👀,我会继续写更多 AI + Android 的实战。</em>
+</p>

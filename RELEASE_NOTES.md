@@ -1,3 +1,47 @@
+# v0.7.1 (2026-06-17) — 关键 bug 修复
+
+## 🐛 修复的 bug
+
+### 1. **点开识别一直是"识别中",永远卡住** ⚠️ 严重
+
+**根因**:`CameraXController.takePicture()` 用了错误的 Mutex 加锁顺序——主线程 `tryLock` 拿到锁后没释放,就 launch 协程,协程里 `withLock` 永远 wait(同线程互斥锁不可重入)。结果:`armOneShotAnalyzer` 永远不被调用,OneShotAnalyzer 永远收不到 frame,`isCapturing` 永远是 true。
+
+**修复**:
+- 删掉外层 `tryLock`,只用 `armed` 标志位防 burst tap
+- Mutex 移到协程内部 `withLock`,成为真正的临界区
+- 额外加 10s 超时保护,即使将来再有死锁,UI 也能恢复("识别超时,请重试")
+
+### 2. **横屏后 TopAppBar 太大占用相机空间**
+
+**修复**:横屏模式(`captureMode = MULTI`)时把 TopAppBar 改成完全透明、隐藏标题、去掉 status bar insets,相机预览占据更多空间。
+
+### 3. **横屏后点返回不切回竖屏**
+
+**修复**:
+- `BackHandler` 拦截硬件/手势返回,横屏时先 `exitMultiPlateMode()` 再返回
+- TopAppBar 返回按钮走同一个 handler
+- 触发后立刻转回竖屏 + 重绑相机,不会"卡"在横屏返回
+
+## 验证
+
+修复后实测完整流程跑通:
+```
+capture requested → arm OneShotAnalyzer → 收到 frame → 解码 375x500 JPEG → 
+disarm → API 调用 → 返回结果 → 弹确认对话框
+```
+
+之前是卡在 `armOneShotAnalyzer` 永远不被调用。
+
+## 升级
+
+```bash
+adb install -r app-debug.apk
+```
+
+设置 → API Key 和识别记录都保留。
+
+---
+
 # v0.7.0 (2026-06-16) — 横屏多车牌扫描
 
 ## 🎯 关键变化

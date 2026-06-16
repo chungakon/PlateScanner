@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
@@ -121,6 +122,13 @@ fun ScannerScreen(
     val apiKey by settingsRepository.apiKeyFlow.collectAsState(initial = "")
     val apiKeyMissing = apiKey.isBlank()
 
+    // v0.7:硬件/手势返回键也走"先退出横屏,再返回"逻辑
+    val isMultiModeForBack = uiState.captureMode ==
+        com.platescanner.app.camera.CameraController.Mode.MULTI
+    BackHandler(enabled = isMultiModeForBack) {
+        viewModel.exitMultiPlateMode()
+    }
+
     var hasPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -219,13 +227,34 @@ fun ScannerScreen(
 
     Scaffold(
         topBar = {
+            // v0.7 横屏优化:横屏时把 TopAppBar 改成透明 + 紧凑,让相机预览
+            // 占据尽可能多的横向空间。竖屏时保持原样(白底 + 标题)。
+            val isMultiMode = uiState.captureMode ==
+                com.platescanner.app.camera.CameraController.Mode.MULTI
+            // v0.7:横屏时按返回 → 先切回竖屏,再返回上一页
+            // (避免直接回到首页还是横屏状态)
+            val backHandler: () -> Unit = {
+                if (isMultiMode) {
+                    viewModel.exitMultiPlateMode()
+                } else {
+                    onBack()
+                }
+            }
             TopAppBar(
-                title = { Text(stringResource(R.string.scanner_title)) },
+                title = {
+                    if (isMultiMode) {
+                        // 横屏时把标题藏起来,只留功能按钮,最大化相机空间
+                    } else {
+                        Text(stringResource(R.string.scanner_title))
+                    }
+                },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = backHandler) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = stringResource(R.string.action_back),
+                            tint = if (isMultiMode) Color.White
+                            else MaterialTheme.colorScheme.onSurface,
                         )
                     }
                 },
@@ -233,8 +262,7 @@ fun ScannerScreen(
                     // v0.7 mode toggle. Switching here rotates the screen
                     // and re-binds the camera at the new resolution.
                     IconButton(onClick = {
-                        if (uiState.captureMode ==
-                            com.platescanner.app.camera.CameraController.Mode.MULTI) {
+                        if (isMultiMode) {
                             viewModel.exitMultiPlateMode()
                         } else {
                             viewModel.enterMultiPlateMode()
@@ -243,25 +271,48 @@ fun ScannerScreen(
                         Icon(
                             imageVector = Icons.Filled.CropLandscape,
                             contentDescription = stringResource(
-                                if (uiState.captureMode ==
-                                    com.platescanner.app.camera.CameraController.Mode.MULTI
-                                ) R.string.scanner_multi_mode_exit
+                                if (isMultiMode) R.string.scanner_multi_mode_exit
                                 else R.string.scanner_multi_mode_enter
                             ),
                             // Highlight when active so the user knows
                             // they're in 横屏 mode.
-                            tint = if (uiState.captureMode ==
-                                com.platescanner.app.camera.CameraController.Mode.MULTI
-                            ) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface,
+                            tint = if (isMultiMode) {
+                                // 横屏时 active 状态用亮色(背景已透明,需要对比)
+                                Color(0xFF00E5FF)
+                            } else if (isMultiMode) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
                         )
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(
                             Icons.Filled.Settings,
                             contentDescription = stringResource(R.string.settings_title),
+                            tint = if (isMultiMode) Color.White
+                            else MaterialTheme.colorScheme.onSurface,
                         )
                     }
+                },
+                colors = if (isMultiMode) {
+                    // 横屏:背景透明,让相机预览占满
+                    androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent,
+                        scrolledContainerColor = Color.Transparent,
+                        navigationIconContentColor = Color.White,
+                        titleContentColor = Color.White,
+                        actionIconContentColor = Color.White,
+                    )
+                } else {
+                    // 竖屏:原样
+                    androidx.compose.material3.TopAppBarDefaults.topAppBarColors()
+                },
+                windowInsets = if (isMultiMode) {
+                    // 横屏:不要 status bar insets,节省垂直空间
+                    androidx.compose.foundation.layout.WindowInsets(0)
+                } else {
+                    androidx.compose.material3.TopAppBarDefaults.windowInsets
                 },
             )
         },

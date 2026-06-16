@@ -214,6 +214,22 @@ class ScannerViewModel @Inject constructor(
             statusMessage = "识别中…",
         )
         cameraController.takePicture()
+        // Safety net: if OneShotAnalyzer never fires (e.g. armOneShotAnalyzer
+        // silently fails or the camera stalls), `isCapturing` would stay
+        // true forever and the user can't tap again. Force-clear after
+        // 10s — generous enough for slow API responses, short enough to
+        // feel responsive. The actual recognition result, if it ever
+        // arrives, will still set isCapturing=false in onSuccess.
+        scope.launch {
+            kotlinx.coroutines.delay(CAPTURE_TIMEOUT_MS)
+            if (_uiState.value.isCapturing) {
+                Timber.w("scanner: capture timeout — clearing isCapturing")
+                _uiState.value = _uiState.value.copy(
+                    isCapturing = false,
+                    statusMessage = "识别超时,请重试",
+                )
+            }
+        }
         Timber.d("scanner: capture requested")
     }
 
@@ -276,6 +292,18 @@ class ScannerViewModel @Inject constructor(
             statusMessage = "横屏识别中…",
         )
         cameraController.takePicture()
+        // Same safety net as [captureNow] — clear isCapturing after
+        // 10s if the camera/recognition pipeline stalls.
+        scope.launch {
+            kotlinx.coroutines.delay(CAPTURE_TIMEOUT_MS)
+            if (_uiState.value.isCapturing) {
+                Timber.w("scanner: multi capture timeout — clearing isCapturing")
+                _uiState.value = _uiState.value.copy(
+                    isCapturing = false,
+                    statusMessage = "横屏识别超时,请重试",
+                )
+            }
+        }
         Timber.d("scanner: multi capture requested")
     }
 
@@ -551,5 +579,14 @@ class ScannerViewModel @Inject constructor(
          * can wave a hand and let the timer take over.
          */
         const val CONFIRM_AUTO_AFTER_MS = 30_000L
+
+        /**
+         * Safety-net timeout for the "isCapturing" indicator. If the
+         * recognition pipeline stalls (camera bind fails, OneShotAnalyzer
+         * never fires, network hangs longer than 8s, ...), the indicator
+         * would otherwise stay on forever and the user can't tap again.
+         * Force-clear after this many ms so the user can retry.
+         */
+        const val CAPTURE_TIMEOUT_MS = 10_000L
     }
 }

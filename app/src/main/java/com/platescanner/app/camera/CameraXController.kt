@@ -186,6 +186,17 @@ class CameraXController(
      * frame the camera delivers becomes a single JPEG delivered to the
      * listener. Re-tapping while a capture is already in flight is safe —
      * we coalesce so a burst-tap only produces one frame.
+     *
+     * Concurrency model:
+     *   - [armed] is the simple "is a capture in flight" flag, set inside
+     *     [armOneShotAnalyzer] and cleared inside [scheduleDisarm].
+     *   - [captureLock] serialises the *order* of arm/fire cycles when
+     *     multiple coroutines happen to fire concurrently (e.g. one tap
+     *     racing with a state-driven restart). We use it ONLY inside the
+     *     coroutine below, not from this outer function — Mutex is not
+     *     reentrant, so the old "tryLock here, withLock inside launch"
+     *     pattern deadlocked itself (the outer lock was never released
+     *     before the inner withLock tried to acquire it).
      */
     override fun takePicture() {
         if (armed) {
@@ -200,26 +211,19 @@ class CameraXController(
             Log.w(TAG, "takePicture: provider not ready; ignoring")
             return
         }
-        // Mutex serializes arm/fire cycles.
-        if (!captureLock.tryLock()) {
-            Log.d(TAG, "takePicture: another arm in progress, ignoring")
-            return
-        }
-        try {
-            scope.launch {
-                captureLock.withLock {
-                    try {
-                        withContext(Dispatchers.Main.immediate) {
-                            armOneShotAnalyzer(cameraProvider, owner)
-                        }
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "takePicture: arm failed", t)
+        // No outer tryLock — see comment above. The `armed` flag above
+        // is enough to coalesce burst taps; captureLock is just an
+        // internal serialiser inside the coroutine.
+        scope.launch {
+            captureLock.withLock {
+                try {
+                    withContext(Dispatchers.Main.immediate) {
+                        armOneShotAnalyzer(cameraProvider, owner)
                     }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "takePicture: arm failed", t)
                 }
             }
-        } finally {
-            // Lock is held inside the coroutine; the .tryLock() above just
-            // guards against a third tap while one is queued.
         }
     }
 
@@ -232,7 +236,11 @@ class CameraXController(
         cameraProvider: ProcessCameraProvider,
         owner: LifecycleOwner,
     ) {
-        if (armed) return
+        if (armed) {
+            Log.d(TAG, "armOneShotAnalyzer: already armed, ignoring")
+            return
+        }
+        Log.d(TAG, "armOneShotAnalyzer: creating ImageAnalysis")
         val analysis = ImageAnalysis.Builder()
             .setResolutionSelector(
                 ResolutionSelector.Builder()
@@ -249,8 +257,14 @@ class CameraXController(
             .build()
         analysis.setAnalyzer(cameraExecutor, OneShotAnalyzer())
         imageAnalysis = analysis
-        // Re-add the analysis use case to the existing camera.
-        cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
+        Log.d(TAG, "armOneShotAnalyzer: calling bindToLifecycle")
+        try {
+            cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
+            Log.d(TAG, "armOneShotAnalyzer: bindToLifecycle returned")
+        } catch (t: Throwable) {
+            Log.e(TAG, "armOneShotAnalyzer: bindToLifecycle FAILED", t)
+            return
+        }
         armed = true
         Log.d(TAG, "takePicture: armed; waiting for next frame")
     }

@@ -81,6 +81,13 @@ class ScannerViewModel @Inject constructor(
         // ----- Confirmation dialog state (change 3) -----
 
         /**
+         * Whether a tap-to-capture is currently in flight. UI uses this to
+         * dim the preview, show a spinner, and disable re-tap until the
+         * recognition round-trip finishes.
+         */
+        val isCapturing: Boolean = false,
+
+        /**
          * When non-null, the Compose dialog is visible with this candidate.
          * The user must tap ✓ (or wait 30s) to commit, or ✗ to dismiss.
          */
@@ -160,6 +167,31 @@ class ScannerViewModel @Inject constructor(
         Timber.d("scanner: stopped")
     }
 
+    /**
+     * User tapped the screen. Ask the camera for a single frame, dim the
+     * UI (so the user knows it's working), and let the existing
+     * `setOnFrameListener` callback in [init] push the JPEG into
+     * [processFrame] for recognition.
+     */
+    fun captureNow() {
+        if (_uiState.value.isCapturing) return  // tap debounce
+        _uiState.value = _uiState.value.copy(
+            isCapturing = true,
+            statusMessage = "识别中…",
+        )
+        cameraController.takePicture()
+        Timber.d("scanner: capture requested")
+    }
+
+    /**
+     * Called by the frame listener when a captured frame finishes
+     * processing. Clears the "识别中" indicator regardless of whether the
+     * recognition matched anything.
+     */
+    private fun finishCaptureRound() {
+        _uiState.value = _uiState.value.copy(isCapturing = false)
+    }
+
     override fun onCleared() {
         super.onCleared()
         cameraController.stop()
@@ -169,6 +201,9 @@ class ScannerViewModel @Inject constructor(
     private suspend fun processFrame(bytes: ByteArray, width: Int, height: Int) {
         val result = api.recognizePlate(bytes)
         result.onSuccess { candidates ->
+            // Always finish the capture round (clear the "识别中" indicator)
+            // whether or not we got a hit.
+            _uiState.value = _uiState.value.copy(isCapturing = false)
             if (candidates.isEmpty()) {
                 _uiState.value = _uiState.value.copy(
                     lastCandidates = emptyList(),
@@ -231,6 +266,7 @@ class ScannerViewModel @Inject constructor(
             )
         }.onFailure { t ->
             Timber.w(t, "recognizePlate failed")
+            _uiState.value = _uiState.value.copy(isCapturing = false)
             _events.emit(Event.Error(t.message ?: "识别失败"))
         }
     }

@@ -6,8 +6,14 @@ import androidx.lifecycle.LifecycleOwner
 /**
  * Abstraction over the camera pipeline.
  *
- * Implementations are safe to call [start] / [stop] / [bindToLifecycle] on the
- * main thread, but the listener may be invoked on a background thread.
+ * Implementations are safe to call [start] / [stop] / [bindToLifecycle] / [takePicture]
+ * on the main thread, but the listener may be invoked on a background thread.
+ *
+ * The user-facing flow is **tap-to-capture**, not auto-capture:
+ *   1. [bindToLifecycle] + [start] open the live preview only.
+ *   2. The user taps the preview area to invoke [takePicture].
+ *   3. The implementation captures a single JPEG frame, hands it to the
+ *      listener, then waits for the next tap.
  *
  * Frame callback receives:
  *  - [ByteArray] — JPEG-encoded image bytes (quality-controlled by impl).
@@ -20,9 +26,7 @@ interface CameraController {
      * [PreviewView] for the live preview surface. The controller will:
      *   1. Acquire the back camera.
      *   2. Attach a [Preview] use case to the [PreviewView].
-     *   3. Attach an [ImageAnalysis] use case for frame callbacks.
-     *
-     * Calling this again with a new owner / surface rebinds the camera.
+     *   3. NOT attach an [ImageAnalysis] use case (capture is on-demand).
      */
     fun bindToLifecycle(
         lifecycleOwner: LifecycleOwner,
@@ -32,6 +36,15 @@ interface CameraController {
     fun start()
 
     fun stop()
+
+    /**
+     * Capture a single frame now, encoding it as JPEG and pushing the
+     * resulting bytes to the registered [setOnFrameListener] listener.
+     *
+     * Safe to call from the main thread. Reentrant-safe — multiple taps in
+     * rapid succession will be processed FIFO on the camera executor.
+     */
+    fun takePicture()
 
     fun setOnFrameListener(listener: (ByteArray, Int, Int) -> Unit)
 

@@ -31,6 +31,10 @@ class StubCameraController : CameraController {
         Log.d(TAG, "stop()")
     }
 
+    override fun takePicture() {
+        Log.d(TAG, "takePicture() — stub; no frame will be delivered")
+    }
+
     override fun setOnFrameListener(listener: (ByteArray, Int, Int) -> Unit) {
         this.listener = listener
     }

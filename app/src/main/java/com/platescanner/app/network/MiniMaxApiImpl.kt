@@ -98,7 +98,7 @@ class MiniMaxApiImpl(
                         ),
                     ),
                 ),
-                thinking = null,
+                thinking = ThinkingConfig(type = "disabled"),
                 temperature = TEMPERATURE,
                 maxCompletionTokens = MAX_TOKENS,
             )
@@ -241,18 +241,13 @@ class MiniMaxApiImpl(
         // Some thinking-capable models (e.g. M3) embed <think>...</think>
         // blocks inside message.content.  Strip them before extracting JSON
         // so the thinking noise never confuses the JSON parser.
-        val stripped = content
-            .replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
-            .replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
-            .trim()
-        val jsonText = extractFirstJsonObject(stripped)
+val jsonText = extractFirstJsonObject(content)
         if (jsonText == null) {
-            Log.w("MiniMaxApi", "PARSE_FAIL: no JSON object found in content — first 200 chars: ${content.take(200)}")
+            Log.w("MiniMaxApi", "PARSE_FAIL: no JSON found — prefix: ${content.take(150)}")
             return emptyList()
         }
         return try {
             val env = json.decodeFromString(PlateListEnvelope.serializer(), jsonText)
-            Log.d("MiniMaxApi", "JSON_OK: plates=[${env.plates.joinToString { it.plate }}]")
             // Filter + canonicalise: drop anything that doesn't parse as a
             // known plate shape, and rewrite the candidate's `plate` field
             // to the canonical (punctuation-stripped, upper-cased) form so

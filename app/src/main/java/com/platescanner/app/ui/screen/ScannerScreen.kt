@@ -24,11 +24,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -60,6 +63,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -217,35 +221,42 @@ fun ScannerScreen(
             )
         },
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            if (hasPermission) {
-                CameraPreview(
-                    lifecycleOwner = lifecycleOwner,
-                    viewModel = viewModel,
-                    uiState = uiState,
-                )
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (apiKeyMissing) {
-                        MissingKeyBanner(onOpenSettings = {
-                            showMissingKeyDialog = false
-                            onOpenSettings()
-                        })
-                    }
-                    ScannerHud(
-                        uiState = uiState,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding),
+    ) {
+        if (hasPermission) {
+            // Tap-to-capture camera preview.
+            // The whole preview area is clickable — the user taps anywhere on
+            // the camera feed to capture one frame, which is then sent to M3
+            // for recognition. While a capture round is in flight the
+            // overlay dims the preview and shows a spinner; new taps are
+            // ignored via the [UiState.isCapturing] debounce.
+            CameraPreview(
+                lifecycleOwner = lifecycleOwner,
+                viewModel = viewModel,
+                uiState = uiState,
+                onTapToCapture = { viewModel.captureNow() },
+            )
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (apiKeyMissing) {
+                    MissingKeyBanner(onOpenSettings = {
+                        showMissingKeyDialog = false
+                        onOpenSettings()
+                    })
                 }
-            } else {
+                ScannerHud(
+                    uiState = uiState,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        } else {
                 PermissionRationale(
                     modifier = Modifier.align(Alignment.Center),
                     onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -479,6 +490,7 @@ private fun CameraPreview(
     lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     viewModel: ScannerViewModel,
     uiState: ScannerViewModel.UiState,
+    onTapToCapture: () -> Unit,
 ) {
     // Hold a single AndroidView-bound PreviewView across recompositions.
     val holder = remember { PreviewViewHolder() }
@@ -486,7 +498,15 @@ private fun CameraPreview(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            // Whole preview area is clickable → fire a single capture.
+            // While a capture is in flight the same gesture is a no-op
+            // (debounced by [UiState.isCapturing]).
+            .pointerInput(uiState.isCapturing) {
+                if (!uiState.isCapturing) {
+                    detectTapGestures(onTap = { onTapToCapture() })
+                }
+            },
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -502,6 +522,68 @@ private fun CameraPreview(
                 holder.view = null
             },
         )
+
+        // Tap-to-capture hint + capturing-in-flight overlay.
+        // Sits on top of the preview (last child of the Box → drawn last).
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    if (uiState.isCapturing) Color.Black.copy(alpha = 0.45f)
+                    else Color.Transparent,
+                ),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            if (uiState.isCapturing) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .padding(bottom = 96.dp)
+                        .background(
+                            Color.Black.copy(alpha = 0.65f),
+                            shape = RoundedCornerShape(24.dp),
+                        )
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                    )
+                    Text(
+                        text = "识别中…",
+                        color = Color.White,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            } else {
+                // Idle hint — the whole area is tappable.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .padding(bottom = 96.dp)
+                        .background(
+                            Color.Black.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(20.dp),
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    androidx.compose.material3.Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Filled.TouchApp,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        text = "点击屏幕拍照识别",
+                        color = Color.White,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
     }
     // Start the camera once the PreviewView is attached to the window.
     // Doing this here (instead of in `update`) avoids re-binding on every

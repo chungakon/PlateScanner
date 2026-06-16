@@ -21,28 +21,37 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 
 /**
  * CameraX-backed implementation of [CameraController].
  *
- * Pipeline:
- *  1. CameraSelector.DEFAULT_BACK_CAMERA → [Preview] + [ImageAnalysis].
- *  2. ImageAnalysis format = YUV_420_888, runs on a single-thread executor.
- *  3. Each emitted frame is converted YUV → RGB Bitmap via CameraX's built-in
- *     `ImageProxy.toBitmap()`, downscaled so the long edge is [MAX_EDGE_PX],
- *     then JPEG-compressed at quality 70.
- *  4. Throttled to at most one emit every [EMIT_INTERVAL_MS] (drop the rest).
- *  5. JPEG bytes + final width/height pushed to the listener on the camera
- *     thread; the listener is responsible for any further offloading.
+ * Pipeline (tap-to-capture):
+ *  1. CameraSelector.DEFAULT_BACK_CAMERA → [Preview] only.
+ *  2. User taps the preview → [takePicture] enqueues a one-shot
+ *     [ImageAnalysis] use case and a [OneShotAnalyzer].
+ *  3. The next frame is converted YUV → RGB Bitmap via
+ *     `ImageProxy.toBitmap()`, downscaled so the long edge is
+ *     [MAX_EDGE_PX], then JPEG-compressed at quality [JPEG_QUALITY].
+ *  4. JPEG bytes + final width/height pushed to the listener on the
+ *     camera thread; the listener is responsible for any further
+ *     offloading.
+ *
+ * Why not use the camera2 `takePicture` API directly? It needs
+ * `CameraDevice` and a custom `CaptureSession` which is more code than the
+ * ImageAnalysis-on-demand trick below. The result is the same: a single
+ * JPEG frame at the moment the user taps.
  */
 class CameraXController(
     private val maxEdgePx: Int = MAX_EDGE_PX,
-    private val emitIntervalMs: Long = EMIT_INTERVAL_MS,
 ) : CameraController {
 
     @Volatile
@@ -57,8 +66,13 @@ class CameraXController(
     @Volatile
     private var provider: ProcessCameraProvider? = null
 
+    /**
+     * Whether the camera is currently in "armed" mode — i.e. an
+     * ImageAnalysis use case is bound and ready to fire on the next frame.
+     * A capture cycle is: arm → wait for frame → fire → disarm.
+     */
     @Volatile
-    private var lastEmitElapsedMs: Long = 0L
+    private var armed: Boolean = false
 
     private val cameraExecutor: java.util.concurrent.ExecutorService =
         Executors.newSingleThreadExecutor { r ->
@@ -73,6 +87,12 @@ class CameraXController(
     private var imageAnalysis: ImageAnalysis? = null
 
     private var bindJob: Job? = null
+
+    /**
+     * Serializes concurrent [takePicture] calls so we don't double-bind /
+     * double-unbind ImageAnalysis under burst tapping.
+     */
+    private val captureLock = Mutex()
 
     override fun bindToLifecycle(
         lifecycleOwner: LifecycleOwner,
@@ -111,35 +131,16 @@ class CameraXController(
                 // thread. Doing them on the cameraExecutor thread throws
                 // `IllegalStateException: Not in application's main thread`
                 // and silently kills the preview (results in a black screen).
-                // We hop to Main here, with the provider already initialised.
                 withContext(Dispatchers.Main.immediate) {
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(surface.surfaceProvider)
                     }
-
-                    val analysis = ImageAnalysis.Builder()
-                        .setResolutionSelector(
-                            ResolutionSelector.Builder()
-                                .setResolutionStrategy(
-                                    ResolutionStrategy(
-                                        android.util.Size(1280, 720),
-                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                                    ),
-                                )
-                                .build(),
-                        )
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                        .build()
-                        .also { ia ->
-                            ia.setAnalyzer(cameraExecutor, FrameAnalyzer())
-                        }
-                    imageAnalysis = analysis
-
                     val selector = CameraSelector.DEFAULT_BACK_CAMERA
                     cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(owner, selector, preview, analysis)
-                    Log.d(TAG, "camera bound; emitting frames")
+                    // Preview only — ImageAnalysis is added on demand per
+                    // [takePicture] call.
+                    cameraProvider.bindToLifecycle(owner, selector, preview)
+                    Log.d(TAG, "camera bound (preview-only)")
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "failed to bind camera", t)
@@ -155,8 +156,145 @@ class CameraXController(
         }
         imageAnalysis?.clearAnalyzer()
         imageAnalysis = null
+        armed = false
         provider = null
         Log.d(TAG, "camera stopped")
+    }
+
+    /**
+     * User tapped the screen — arm an ImageAnalysis use case so the **next**
+     * frame the camera delivers becomes a single JPEG delivered to the
+     * listener. Re-tapping while a capture is already in flight is safe —
+     * we coalesce so a burst-tap only produces one frame.
+     */
+    override fun takePicture() {
+        if (armed) {
+            Log.d(TAG, "takePicture: already armed, ignoring duplicate tap")
+            return
+        }
+        val owner = lifecycleOwner ?: run {
+            Log.w(TAG, "takePicture: no lifecycle owner; ignoring")
+            return
+        }
+        val cameraProvider = provider ?: run {
+            Log.w(TAG, "takePicture: provider not ready; ignoring")
+            return
+        }
+        // Mutex serializes arm/fire cycles.
+        if (!captureLock.tryLock()) {
+            Log.d(TAG, "takePicture: another arm in progress, ignoring")
+            return
+        }
+        try {
+            scope.launch {
+                captureLock.withLock {
+                    try {
+                        withContext(Dispatchers.Main.immediate) {
+                            armOneShotAnalyzer(cameraProvider, owner)
+                        }
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "takePicture: arm failed", t)
+                    }
+                }
+            }
+        } finally {
+            // Lock is held inside the coroutine; the .tryLock() above just
+            // guards against a third tap while one is queued.
+        }
+    }
+
+    /**
+     * Bind a one-shot [ImageAnalysis] on the main thread. The next frame
+     * is delivered to [OneShotAnalyzer], which then disarms itself
+     * (unbinds the analysis) and invokes the user listener.
+     */
+    private fun armOneShotAnalyzer(
+        cameraProvider: ProcessCameraProvider,
+        owner: LifecycleOwner,
+    ) {
+        if (armed) return
+        val analysis = ImageAnalysis.Builder()
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            android.util.Size(1280, 720),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                        ),
+                    )
+                    .build(),
+            )
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .build()
+        analysis.setAnalyzer(cameraExecutor, OneShotAnalyzer())
+        imageAnalysis = analysis
+        // Re-add the analysis use case to the existing camera.
+        cameraProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
+        armed = true
+        Log.d(TAG, "takePicture: armed; waiting for next frame")
+    }
+
+    /**
+     * Fires on the camera thread exactly once per [takePicture] call.
+     * Captures the frame, invokes the listener, then schedules an
+     * async disarm on the main thread.
+     */
+    private inner class OneShotAnalyzer : ImageAnalysis.Analyzer {
+        @SuppressLint("UnsafeOptInUsageError")
+        override fun analyze(image: ImageProxy) {
+            try {
+                val raw: Bitmap = image.toBitmap()
+                val rotated = applyRotationIfNeeded(raw, image.imageInfo.rotationDegrees)
+                if (rotated !== raw) raw.recycle()
+                val (resized, w, h) = resizeBitmapLongEdge(rotated, maxEdgePx)
+                if (resized !== rotated) rotated.recycle()
+                val out = ByteArrayOutputStream((w * h / 4).coerceAtLeast(1024))
+                val ok = resized.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+                resized.recycle()
+                if (!ok) {
+                    Log.w(TAG, "OneShotAnalyzer: JPEG compress failed")
+                    scheduleDisarm()
+                    return
+                }
+                Log.d(TAG, "OneShotAnalyzer: captured ${w}x$h, delivering to listener")
+                listener?.invoke(out.toByteArray(), w, h)
+                scheduleDisarm()
+            } catch (t: Throwable) {
+                Log.w(TAG, "OneShotAnalyzer: analyze failed", t)
+                scheduleDisarm()
+            } finally {
+                image.close()
+            }
+        }
+    }
+
+    /**
+     * Async-unbind the ImageAnalysis so subsequent frames don't pile up.
+     * Runs on Main because [ProcessCameraProvider.unbind] is not thread-safe.
+     */
+    private fun scheduleDisarm() {
+        val owner = lifecycleOwner ?: return
+        val cameraProvider = provider ?: return
+        scope.launch {
+            try {
+                withContext(Dispatchers.Main.immediate) {
+                    imageAnalysis?.clearAnalyzer()
+                    imageAnalysis = null
+                    // Rebind preview-only (drops the analysis use case).
+                    cameraProvider.unbindAll()
+                    val preview = Preview.Builder().build()
+                    cameraProvider.bindToLifecycle(
+                        owner, CameraSelector.DEFAULT_BACK_CAMERA, preview,
+                    )
+                    armed = false
+                    Log.d(TAG, "OneShotAnalyzer: disarmed, back to preview-only")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "scheduleDisarm: failed", t)
+                armed = false
+            }
+        }
     }
 
     override fun setOnFrameListener(listener: (ByteArray, Int, Int) -> Unit) {
@@ -179,42 +317,6 @@ class CameraXController(
         scope.cancel()
     }
 
-    /**
-     * Analyzer that runs on [cameraExecutor]. Each frame is YUV → Bitmap →
-     * downscale → JPEG bytes, then throttled before being emitted.
-     */
-    private inner class FrameAnalyzer : ImageAnalysis.Analyzer {
-        @SuppressLint("UnsafeOptInUsageError")
-        override fun analyze(image: ImageProxy) {
-            try {
-                val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastEmitElapsedMs < emitIntervalMs) {
-                    // Drop frame to enforce throttle.
-                    return
-                }
-                // CameraX 1.3.3 ships `ImageProxy.toBitmap()` for YUV/JPEG.
-                // The return type is `@NonNull Bitmap` on the Java side; the
-                // Kotlin compiler infers a non-null receiver, so we can drop
-                // any defensive null check.
-                val raw: Bitmap = image.toBitmap()
-                val rotated = applyRotationIfNeeded(raw, image.imageInfo.rotationDegrees)
-                if (rotated !== raw) raw.recycle()
-                val (resized, w, h) = resizeBitmapLongEdge(rotated, maxEdgePx)
-                if (resized !== rotated) rotated.recycle()
-                val out = ByteArrayOutputStream((w * h / 4).coerceAtLeast(1024))
-                val ok = resized.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-                resized.recycle()
-                if (!ok) return
-                lastEmitElapsedMs = now
-                listener?.invoke(out.toByteArray(), w, h)
-            } catch (t: Throwable) {
-                Log.w(TAG, "analyze failed", t)
-            } finally {
-                image.close()
-            }
-        }
-    }
-
     private fun applyRotationIfNeeded(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
         if (rotationDegrees == 0) return bitmap
         val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
@@ -224,13 +326,9 @@ class CameraXController(
     companion object {
         private const val TAG = "CameraXController"
         const val MAX_EDGE_PX = 500
-        // Tightened from 500ms → 300ms after user testing: with the same
-        // network, 300ms gives ~1.6x more recognition attempts per minute
-        // and the UI's bbox overlay still updates smoothly.
-        const val EMIT_INTERVAL_MS = 150L
         // Lowered from 70 → 60 to shrink the upload payload (M3 charges per
         // token, and JPEG artifacts at this resolution are barely visible to
-        // the model). 800px long edge is unchanged.
+        // the model). 500px long edge is unchanged.
         const val JPEG_QUALITY = 60
     }
 }

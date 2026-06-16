@@ -135,6 +135,79 @@ class MiniMaxApiImpl(
             Result.success(candidates)
         }
 
+    /**
+     * v0.7 "横屏多车" mode. Same wire format as [recognizePlate] but:
+     *   1. Uses [MULTI_RECOGNITION_PROMPT] which explicitly asks the model
+     *      to return ALL visible plates, not the "primary" one.
+     *   2. Uses a larger token budget so up to 3 plates fit in the JSON
+     *      envelope (each plate is ~50-80 tokens of JSON).
+     *   3. Uses [MULTI_MAX_TOKENS] to give the model headroom for wide shots.
+     *
+     * In v0.7 the caller (ScannerViewModel) is responsible for picking the
+     * resolution: it sends a 1920x1080 landscape JPEG (we downscale only if
+     * the device's camera produced a smaller image — 99% of phones deliver
+     * at least 1920 wide when shooting landscape).
+     */
+    override suspend fun recognizeMultiPlate(imageBytes: ByteArray): Result<List<PlateCandidate>> =
+        withContext(Dispatchers.IO) {
+            val apiKey = settingsRepository.apiKey()
+            val model = settingsRepository.modelId()
+            val baseUrl = settingsRepository.baseUrl()
+
+            if (apiKey.isBlank()) {
+                return@withContext Result.success(emptyList())
+            }
+            val base64 = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
+            val dataUri = "data:image/jpeg;base64,$base64"
+            val request = ChatCompletionRequest(
+                model = model,
+                messages = listOf(
+                    ChatMessage(
+                        role = "user",
+                        content = listOf(
+                            ChatContentPart.Text(MULTI_RECOGNITION_PROMPT),
+                            ChatContentPart.ImageUrl(
+                                ImageUrlRef(url = dataUri),
+                            ),
+                        ),
+                    ),
+                ),
+                thinking = ThinkingConfig(type = "disabled"),
+                temperature = TEMPERATURE,
+                maxCompletionTokens = MULTI_MAX_TOKENS,
+            )
+
+            val service = retrofitFor(baseUrl).create(ChatCompletionsService::class.java)
+
+            val response: retrofit2.Response<ChatCompletionResponse> = try {
+                service.completeChat(body = request).execute()
+            } catch (t: java.io.IOException) {
+                try {
+                    service.completeChat(body = request).execute()
+                } catch (t2: java.io.IOException) {
+                    return@withContext Result.success(emptyList())
+                }
+            }
+
+            if (!response.isSuccessful) {
+                Log.w("MiniMaxApi", "MULTI HTTP ${response.code()} — body: ${response.errorBody()?.string()?.take(200)}")
+                return@withContext Result.success(emptyList())
+            }
+            val body = response.body() ?: run {
+                Log.w("MiniMaxApi", "MULTI HTTP 200 but body was null")
+                return@withContext Result.success(emptyList())
+            }
+            val content = body.choices.firstOrNull()?.message?.content
+            Log.i("MiniMaxApi", "MULTI RAW model content: ${content?.take(500)}")
+            if (content == null) {
+                Log.w("MiniMaxApi", "MULTI Body had no choices[0].message.content")
+                return@withContext Result.success(emptyList())
+            }
+            val candidates = parsePlateCandidates(content)
+            Log.i("MiniMaxApi", "MULTI PARSED ${candidates.size} candidates: ${candidates.map { "${it.plate}(conf=${it.confidence},bbox=${it.bbox})" }}")
+            Result.success(candidates)
+        }
+
     override suspend fun testConnection(): Result<String> =
         withContext(Dispatchers.IO) {
             val apiKey = settingsRepository.apiKey()
@@ -303,6 +376,45 @@ val jsonText = extractFirstJsonObject(content)
                 "{\"plates\": [{\"plate\": \"粤TDH8884\", \"confidence\": 0.95, \"bbox\": [x1, y1, x2, y2]}]}\n" +
                 "bbox 是归一化坐标(0-1 范围,左上角原点)。\n" +
                 "如果图中没有车牌,返回 {\"plates\": []}。"
+
+        /**
+         * v0.7 wide-shot prompt. Used by the "横屏多车" mode where the user
+         * captures 2-3 cars in one landscape frame. Key differences from
+         * [RECOGNITION_PROMPT]:
+         *
+         *   1. Explicitly says "all visible plates" so the model doesn't
+         *      pick only the largest/most central one.
+         *   2. Forbids the model from inventing a plate when the read is
+         *      uncertain — better to return empty than to fabricate.
+         *   3. Asks for the plates to be ordered **left-to-right in the
+         *      image** so the UI grid matches what the user sees.
+         *   4. Caps at 3 plates because that's the practical ceiling for
+         *      wide-shot accuracy (4+ typically drops below 50%).
+         */
+        const val MULTI_RECOGNITION_PROMPT: String =
+            "请仔细查看图片,提取图中所有可见的车牌号(最多 3 张)。\n" +
+                "这是一张横屏拍摄的停车场照片,可能同时包含 2-3 辆并排停放的车。\n" +
+                "请按从左到右的顺序返回所有识别到的车牌。\n" +
+                "车牌按类型分:\n" +
+                "- 蓝/黄/白牌:1 个中文(省简称)+ 1 个字母 + 5 个字符(共 7 字符)\n" +
+                "- 绿牌(新能源):1 个中文 + A/B/C/D/F + 6 个字符(共 8 字符)\n" +
+                "- 港澳:2-3 字母 + 2-5 字符(纯字母数字,无中文)\n" +
+                "重要规则:\n" +
+                "- 务必返回所有清晰可识别的车牌,不要遗漏\n" +
+                "- 如果某张车牌模糊到无法确认,**跳过它**,不要猜测或编造\n" +
+                "- 只输出你能 100% 确认的字符\n" +
+                "输出格式(JSON,不要任何额外说明):" +
+                "{\"plates\": [{\"plate\": \"粤TDH8884\", \"confidence\": 0.95, \"bbox\": [x1, y1, x2, y2]}]}\n" +
+                "bbox 是归一化坐标(0-1 范围,左上角原点),对应车牌在原图中的位置。\n" +
+                "如果图中没有车牌,返回 {\"plates\": []}。"
+
+        /**
+         * Larger token budget for the wide-shot prompt. Each plate's JSON
+         * entry is ~50-80 tokens (plate + confidence + 4 bbox floats +
+         * structure overhead). 3 plates + envelope ≈ 350 tokens; we leave
+         * 100 tokens of headroom for prose / edge cases.
+         */
+        const val MULTI_MAX_TOKENS: Int = 500
 
         /**
          * Pull the first balanced `{...}` JSON object out of a free-form LLM

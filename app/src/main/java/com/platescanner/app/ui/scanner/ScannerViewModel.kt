@@ -104,6 +104,40 @@ class ScannerViewModel @Inject constructor(
          * recomputes "remaining" by subtracting from this on each tick.
          */
         val pendingOpenedAtMs: Long = 0L,
+
+        // ----- v0.7 wide-shot (横屏多车) state -----
+
+        /**
+         * Current camera capture mode. Mirrors [CameraController.currentMode].
+         * SINGLE is the v0.6 vertical single-plate capture; MULTI is the
+         * v0.7 landscape wide-shot. The scanner screen uses this to render
+         * the right hint and the right "横屏多车" toggle button state.
+         */
+        val captureMode: com.platescanner.app.camera.CameraController.Mode =
+            com.platescanner.app.camera.CameraController.Mode.SINGLE,
+
+        /**
+         * When non-null, the multi-plate grid dialog is visible with the
+         * given list of candidates. The user picks which ones to commit
+         * (one-by-one, with "✓/✗" toggles) and then taps the bottom
+         * "确认全部" button to persist.
+         *
+         * Distinct from [pendingConfirmation] (which is the v0.6
+         * single-plate dialog). When this is non-null, [pendingConfirmation]
+         * is always null — the two dialogs are mutually exclusive.
+         */
+        val pendingMultiConfirm: List<PlateCandidate> = emptyList(),
+        /**
+         * The wide-shot JPEG bytes backing the multi-plate grid. Single
+         * shared thumbnail for all plates in the batch (saved to disk
+         * once and linked via [PlateRecordRepository.insertManyIfFresh]).
+         */
+        val pendingMultiFrameBytes: ByteArray? = null,
+        /**
+         * Wall-clock ms the multi-plate grid was opened. Auto-confirms
+         * all selected plates after 30s. See [pendingOpenedAtMs].
+         */
+        val pendingMultiOpenedAtMs: Long = 0L,
     )
 
     sealed interface Event {
@@ -184,6 +218,127 @@ class ScannerViewModel @Inject constructor(
     }
 
     /**
+     * v0.7 mode toggle. The scanner screen's "横屏多车" button calls this.
+     *
+     *   - Flips [CameraController] to MULTI mode (higher resolution,
+     *     1920x1080 landscape) or back to SINGLE (1280x720 vertical).
+     *   - Updates [UiState.captureMode] so the UI re-renders the right
+     *     hint and the right button state.
+     *   - Closes any open dialog (the previous capture's confirmation
+     *     is invalidated by the orientation flip — a vertical thumbnail
+     *     on a landscape screen is awkward to confirm).
+     */
+    fun enterMultiPlateMode() {
+        if (_uiState.value.captureMode == com.platescanner.app.camera.CameraController.Mode.MULTI) return
+        cameraController.switchToMultiPlateMode()
+        _uiState.value = _uiState.value.copy(
+            captureMode = com.platescanner.app.camera.CameraController.Mode.MULTI,
+            // Drop any open v0.6 single-plate dialog — user has shifted
+            // intent, the candidate is no longer the right thing to
+            // confirm in the new orientation.
+            pendingConfirmation = null,
+            pendingFrameBytes = null,
+            pendingOpenedAtMs = 0L,
+            statusMessage = "横屏多车模式:对准 2-3 辆并排的车,点击拍摄",
+        )
+        Timber.d("scanner: entered multi-plate mode")
+    }
+
+    fun exitMultiPlateMode() {
+        if (_uiState.value.captureMode == com.platescanner.app.camera.CameraController.Mode.SINGLE) return
+        cameraController.switchToSingleMode()
+        _uiState.value = _uiState.value.copy(
+            captureMode = com.platescanner.app.camera.CameraController.Mode.SINGLE,
+            // Drop any open multi-plate grid too.
+            pendingMultiConfirm = emptyList(),
+            pendingMultiFrameBytes = null,
+            pendingMultiOpenedAtMs = 0L,
+            statusMessage = "已切换回标准模式",
+        )
+        Timber.d("scanner: exited multi-plate mode")
+    }
+
+    /**
+     * v0.7 wide-shot capture. Same as [captureNow] but:
+     *   1. The status message is different ("横屏识别中…").
+     *   2. The dialog that opens on hit is the multi-plate grid, not
+     *      the single-plate one.
+     *
+     * Implementation reuses [captureNow] + the existing [processFrame]
+     * pipeline — the only difference is that we ask the API to look
+     * for *all* plates. We achieve this by swapping in a different
+     * [processFrame] implementation that calls [MiniMaxApi.recognizeMultiPlate].
+     */
+    fun captureMulti() {
+        if (_uiState.value.isCapturing) return
+        _uiState.value = _uiState.value.copy(
+            isCapturing = true,
+            statusMessage = "横屏识别中…",
+        )
+        cameraController.takePicture()
+        Timber.d("scanner: multi capture requested")
+    }
+
+    /**
+     * User confirmed the multi-plate grid with a [selected] subset of
+     * the candidates. Persists only the ones they ticked; the rest are
+     * dropped. Throws no error if [selected] is empty (the user might
+     * have un-ticked everything — we just close the dialog).
+     */
+    fun confirmMultiSelected(selected: List<PlateCandidate>) {
+        val current = _uiState.value
+        val candidates = current.pendingMultiConfirm
+        val bytes = current.pendingMultiFrameBytes
+        if (candidates.isEmpty()) return
+        val now = System.currentTimeMillis()
+        // Drop the dialog first.
+        _uiState.value = current.copy(
+            pendingMultiConfirm = emptyList(),
+            pendingMultiFrameBytes = null,
+            pendingMultiOpenedAtMs = 0L,
+        )
+        if (selected.isEmpty()) {
+            Timber.d("scanner: confirmMultiSelected with empty selection — closing only")
+            return
+        }
+        scope.launch {
+            val inserted = withContext(Dispatchers.IO) {
+                repository.insertManyIfFresh(
+                    records = selected.map { c ->
+                        PlateRecord(
+                            plate = c.plate,
+                            capturedAt = now,
+                            thumbnailPath = null,
+                            confidence = c.confidence,
+                        )
+                    },
+                    thumbnailBytes = bytes,
+                )
+            }
+            inserted.forEach { plate ->
+                _events.emit(Event.Recognized(plate))
+            }
+            if (inserted.isNotEmpty()) {
+                triggerHaptic()
+                refreshRecent()
+            }
+        }
+    }
+
+    /**
+     * User dismissed the multi-plate grid without confirming anything.
+     */
+    fun skipMulti() {
+        val current = _uiState.value
+        if (current.pendingMultiConfirm.isEmpty()) return
+        _uiState.value = current.copy(
+            pendingMultiConfirm = emptyList(),
+            pendingMultiFrameBytes = null,
+            pendingMultiOpenedAtMs = 0L,
+        )
+    }
+
+    /**
      * Called by the frame listener when a captured frame finishes
      * processing. Clears the "识别中" indicator regardless of whether the
      * recognition matched anything.
@@ -199,7 +354,13 @@ class ScannerViewModel @Inject constructor(
     }
 
     private suspend fun processFrame(bytes: ByteArray, width: Int, height: Int) {
-        val result = api.recognizePlate(bytes)
+        val isMulti = _uiState.value.captureMode ==
+            com.platescanner.app.camera.CameraController.Mode.MULTI
+        val result = if (isMulti) {
+            api.recognizeMultiPlate(bytes)
+        } else {
+            api.recognizePlate(bytes)
+        }
         result.onSuccess { candidates ->
             // Always finish the capture round (clear the "识别中" indicator)
             // whether or not we got a hit.
@@ -220,6 +381,27 @@ class ScannerViewModel @Inject constructor(
                 latestFrameWidth = width.takeIf { it > 0 },
                 latestFrameHeight = height.takeIf { it > 0 },
             )
+
+            // v0.7 multi-plate grid flow: in MULTI mode we open the grid
+            // dialog with ALL candidates, not just the first one. The
+            // single-plate (v0.6) flow below is skipped entirely.
+            if (isMulti) {
+                val now = System.currentTimeMillis()
+                // Don't stack a grid on top of an existing one.
+                if (_uiState.value.pendingMultiConfirm.isNotEmpty()) {
+                    return@onSuccess
+                }
+                _uiState.value = _uiState.value.copy(
+                    pendingMultiConfirm = candidates,
+                    pendingMultiFrameBytes = bytes,
+                    pendingMultiOpenedAtMs = now,
+                    // Show the leftmost plate's bbox on the overlay so the
+                    // user has a visual anchor while the grid is loading.
+                    latestPlate = candidates.first().plate,
+                    latestBbox = candidates.first().bbox,
+                )
+                return@onSuccess
+            }
 
             // New flow: do NOT insert directly. Hand the first fresh
             // candidate to the confirmation dialog and stop. We only handle

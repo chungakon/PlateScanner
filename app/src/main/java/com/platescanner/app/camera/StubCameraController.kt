@@ -35,6 +35,16 @@ class StubCameraController : CameraController {
         Log.d(TAG, "takePicture() — stub; no frame will be delivered")
     }
 
+    override fun switchToMultiPlateMode() {
+        Log.d(TAG, "switchToMultiPlateMode() — stub")
+    }
+
+    override fun switchToSingleMode() {
+        Log.d(TAG, "switchToSingleMode() — stub")
+    }
+
+    override fun currentMode(): CameraController.Mode = CameraController.Mode.SINGLE
+
     override fun setOnFrameListener(listener: (ByteArray, Int, Int) -> Unit) {
         this.listener = listener
     }

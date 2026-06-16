@@ -26,6 +26,14 @@ interface PlateRecordDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(record: PlateRecord): Long
 
+    /**
+     * v0.7 batch insert. Same semantics as [insert] but in one transaction
+     * so the 3 plates from a single wide-shot land in adjacent rows (and
+     * therefore appear next to each other in the history list).
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(records: List<PlateRecord>): List<Long>
+
     @Query("DELETE FROM plate_records WHERE id = :id")
     suspend fun deleteById(id: Long): Int
 

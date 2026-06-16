@@ -70,6 +70,76 @@ class PlateRecordRepository @Inject constructor(
         return true
     }
 
+    /**
+     * v0.7 "横屏多车" batch insert. Inserts each [record] in [records]
+     * under the same dedup rules as [insertIfFresh] — i.e. plates that
+     * have been seen in the last [DEDUP_WINDOW_MS] are silently dropped.
+     *
+     * Same [thumbnailBytes] (the wide-shot frame) is shared across all
+     * records because there is one frame per batch. The thumbnail is
+     * saved once and the same path is attached to every record, so the
+     * 识别记录 list shows the same preview image for all 2-3 plates
+     * from the same shot (which is the desired behaviour — the user
+     * can see "ah, I shot this lane together").
+     *
+     * @return the list of plates that were actually inserted (deduped
+     *         ones are excluded). Order matches [records] (deduped
+     *         entries are simply absent).
+     */
+    suspend fun insertManyIfFresh(
+        records: List<PlateRecord>,
+        thumbnailBytes: ByteArray?,
+    ): List<String> {
+        if (records.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
+        val savedPath: String? = thumbnailBytes?.let {
+            // Save the shared thumbnail once. We use the timestamp as the
+            // file prefix and append "_multi" so it's distinguishable from
+            // single-shot thumbnails in the file system.
+            try {
+                val dir = File(context.filesDir, THUMB_DIR).apply { mkdirs() }
+                val file = File(dir, "${now}_multi.jpg")
+                FileOutputStream(file).use { out ->
+                    out.write(it)
+                    out.flush()
+                }
+                file.absolutePath
+            } catch (t: Throwable) {
+                Log.w(TAG, "insertManyIfFresh: shared thumbnail save failed", t)
+                null
+            }
+        }
+
+        val inserted = mutableListOf<String>()
+        // Single canonicalisation pass + dedup decision per record. We do
+        // this OUTSIDE the synchronized block of the loop body so we don't
+        // hold the lock across IO (the inserts themselves are also off the
+        // lock, but we want the dedup *decision* to be atomic).
+        val toPersist = synchronized(dedupMutex) {
+            records.mapNotNull { record ->
+                val canonical = canonicalise(record.plate)
+                val last = recentPlates[canonical]
+                if (last != null && now - last < DEDUP_WINDOW_MS) {
+                    Log.d(TAG, "insertMany: dedup $canonical (${now - last} ms ago)")
+                    return@mapNotNull null
+                }
+                recentPlates[canonical] = now
+                record.copy(
+                    plate = canonical,
+                    capturedAt = if (record.capturedAt > 0) record.capturedAt else now,
+                    thumbnailPath = savedPath ?: record.thumbnailPath,
+                )
+            }
+        }
+        if (toPersist.isEmpty()) return emptyList()
+        // dao.insert returns Long (rowid) per element; we just need the
+        // plates that went through. Run as one transaction to keep the
+        // history page consistent (all 3 plates appear together).
+        dao.insertAll(toPersist)
+        toPersist.forEach { inserted.add(it.plate) }
+        return inserted
+    }
+
     suspend fun findById(id: Long): PlateRecord? = dao.findById(id)
 
     suspend fun deleteById(id: Long): Int = dao.deleteById(id)

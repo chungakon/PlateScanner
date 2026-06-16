@@ -14,6 +14,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
+import com.platescanner.app.camera.CameraController.Mode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -54,6 +55,15 @@ class CameraXController(
     private val maxEdgePx: Int = MAX_EDGE_PX,
 ) : CameraController {
 
+    /**
+     * v0.7 wide-shot resolution cap. Higher than [MAX_EDGE_PX] so small
+     * plates in a landscape frame stay readable. 1500px is the sweet
+     * spot: a plate that occupies 8% of the 1920px width is ~150px
+     * wide, well above the model's ~30px minimum, and the JPEG payload
+     * is still under 200KB at quality 60.
+     */
+    private val multiModeMaxEdgePx: Int = MULTI_MAX_EDGE_PX
+
     @Volatile
     private var listener: ((ByteArray, Int, Int) -> Unit)? = null
 
@@ -73,6 +83,16 @@ class CameraXController(
      */
     @Volatile
     private var armed: Boolean = false
+
+    /**
+     * v0.7 capture mode. v0.6 always uses [Mode.SINGLE] (lower resolution,
+     * 500px long edge). When the user enters the "横屏多车" mode, the UI
+     * calls [switchToMultiPlateMode] which flips this to [Mode.MULTI] and
+     * re-binds the camera at a higher resolution so small plates in a
+     * wide frame stay above the model's minimum pixel threshold.
+     */
+    @Volatile
+    private var mode: Mode = Mode.SINGLE
 
     private val cameraExecutor: java.util.concurrent.ExecutorService =
         Executors.newSingleThreadExecutor { r ->
@@ -247,10 +267,10 @@ class CameraXController(
                 val raw: Bitmap = image.toBitmap()
                 val rotated = applyRotationIfNeeded(raw, image.imageInfo.rotationDegrees)
                 if (rotated !== raw) raw.recycle()
-                val (resized, w, h) = resizeBitmapLongEdge(rotated, maxEdgePx)
+                val (resized, w, h) = resizeBitmapLongEdge(rotated, effectiveMaxEdgePx())
                 if (resized !== rotated) rotated.recycle()
                 val out = ByteArrayOutputStream((w * h / 4).coerceAtLeast(1024))
-                val ok = resized.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+                val ok = resized.compress(Bitmap.CompressFormat.JPEG, effectiveJpegQuality(), out)
                 resized.recycle()
                 if (!ok) {
                     Log.w(TAG, "OneShotAnalyzer: JPEG compress failed")
@@ -305,6 +325,95 @@ class CameraXController(
         this.listener = null
     }
 
+    override fun switchToMultiPlateMode() {
+        if (mode == Mode.MULTI) {
+            Log.d(TAG, "switchToMultiPlateMode: already in MULTI mode, ignoring")
+            return
+        }
+        Log.d(TAG, "switchToMultiPlateMode: flipping to MULTI (max edge ${multiModeMaxEdgePx}px)")
+        mode = Mode.MULTI
+        // v0.7 multi-mode re-binds the camera at a higher resolution
+        // (1920x1080) instead of the v0.6 1280x720. The next takePicture
+        // call picks up the new resolution via [effectiveMaxEdgePx].
+        rebindForMode()
+    }
+
+    override fun switchToSingleMode() {
+        if (mode == Mode.SINGLE) {
+            Log.d(TAG, "switchToSingleMode: already in SINGLE mode, ignoring")
+            return
+        }
+        Log.d(TAG, "switchToSingleMode: flipping to SINGLE (max edge ${maxEdgePx}px)")
+        mode = Mode.SINGLE
+        rebindForMode()
+    }
+
+    override fun currentMode(): Mode = mode
+
+    /**
+     * Re-bind the preview use case at the resolution appropriate for the
+     * current [mode]. Called by [switchToMultiPlateMode] /
+     * [switchToSingleMode]. We unbind everything and re-bind Preview only
+     * (the OneShotAnalyzer is arm-on-tap so it doesn't need a permanent
+     * binding here).
+     */
+    private fun rebindForMode() {
+        val owner = lifecycleOwner ?: return
+        val surface = previewView ?: return
+        val cameraProvider = provider ?: return
+        val targetSize = if (mode == Mode.MULTI) {
+            android.util.Size(1920, 1080)
+        } else {
+            android.util.Size(1280, 720)
+        }
+        scope.launch {
+            try {
+                withContext(Dispatchers.Main.immediate) {
+                    cameraProvider.unbindAll()
+                    val preview = Preview.Builder()
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setResolutionStrategy(
+                                    ResolutionStrategy(
+                                        targetSize,
+                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                                    ),
+                                )
+                                .build(),
+                        )
+                        .build()
+                    preview.setSurfaceProvider(surface.surfaceProvider)
+                    cameraProvider.bindToLifecycle(
+                        owner, CameraSelector.DEFAULT_BACK_CAMERA, preview,
+                    )
+                    Log.d(TAG, "rebound preview for $mode at ${targetSize.width}x${targetSize.height}")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "rebindForMode: failed", t)
+            }
+        }
+    }
+
+    /**
+     * Per-mode edge cap. SINGLE is v0.6's 500px (saves tokens, 1 car in frame).
+     * MULTI is 1500px (3 cars in frame; each plate still ~150px wide, well
+     * above the model's minimum).
+     */
+    private fun effectiveMaxEdgePx(): Int = when (mode) {
+        Mode.SINGLE -> maxEdgePx
+        Mode.MULTI -> multiModeMaxEdgePx
+    }
+
+    /**
+     * Per-mode JPEG quality. SINGLE is 60 (saves tokens). MULTI is 70
+     * because compressed artifacts on a small plate in a wide frame are
+     * more damaging than on a single-car close-up.
+     */
+    private fun effectiveJpegQuality(): Int = when (mode) {
+        Mode.SINGLE -> JPEG_QUALITY
+        Mode.MULTI -> MULTI_JPEG_QUALITY
+    }
+
     /** Release the camera executor. Safe to call multiple times. */
     fun shutdown() {
         stop()
@@ -330,6 +439,12 @@ class CameraXController(
         // token, and JPEG artifacts at this resolution are barely visible to
         // the model). 500px long edge is unchanged.
         const val JPEG_QUALITY = 60
+
+        // v0.7 wide-shot cap. See [CameraXController.multiModeMaxEdgePx].
+        const val MULTI_MAX_EDGE_PX = 1500
+        // v0.7 wide-shot quality. 70 (vs single-mode 60) to preserve small
+        // plate details under heavy JPEG compression.
+        const val MULTI_JPEG_QUALITY = 70
     }
 }
 

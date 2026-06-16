@@ -20,6 +20,16 @@
     <string name="scanner_missing_key_go_settings">去设置</string>
     <string name="scanner_missing_key_banner">未配置 API Key,识别功能暂不可用</string>
 
+    <!-- v0.7 wide-shot (横屏多车) mode -->
+    <string name="scanner_multi_mode_enter">横屏多车</string>
+    <string name="scanner_multi_mode_exit">退出横屏</string>
+    <string name="scanner_multi_hint">横屏对准 2-3 辆并排的车,点击拍照</string>
+    <string name="scanner_single_hint">点击屏幕拍照识别</string>
+    <string name="scanner_multi_grid_title">识别到 %1$d 辆车</string>
+    <string name="scanner_multi_grid_confirm_all">确认全部</string>
+    <string name="scanner_multi_grid_skip">跳过</string>
+    <string name="scanner_multi_grid_select_hint">勾选要入库的车牌</string>
+
     <!-- Records -->
     <string name="records_title">已识别记录</string>
     <string name="records_empty">还没有识别记录</string>

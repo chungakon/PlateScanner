@@ -14,6 +14,20 @@ interface MiniMaxApi {
     suspend fun recognizePlate(imageBytes: ByteArray): Result<List<PlateCandidate>>
 
     /**
+     * Wide-shot multi-plate recognition. Used by the v0.7 "横屏多车" mode:
+     * the user holds the phone landscape and fits 2-3 cars in one frame.
+     *
+     * Same wire format as [recognizePlate] but with a different prompt that
+     * emphasises "all visible plates" rather than the "primary" plate. The
+     * implementation may also use a higher JPEG quality / resolution to
+     * preserve the smaller plate details in a wide frame.
+     *
+     * Returns 0..N candidates; 0 is fine if the user captured an empty lane.
+     */
+    suspend fun recognizeMultiPlate(imageBytes: ByteArray): Result<List<PlateCandidate>> =
+        recognizePlate(imageBytes)
+
+    /**
      * Lightweight connection test — sends a minimal request to verify the
      * configured base URL + API key are reachable and the model accepts
      * the expected message format.

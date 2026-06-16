@@ -41,10 +41,43 @@ interface CameraController {
      * Capture a single frame now, encoding it as JPEG and pushing the
      * resulting bytes to the registered [setOnFrameListener] listener.
      *
-     * Safe to call from the main thread. Reentrant-safe — multiple taps in
-     * rapid succession will be processed FIFO on the camera executor.
+     * The implementation captures a single JPEG frame, hands it to the
+     * listener, then waits for the next tap. Multiple in-flight calls
+     * are coalesced — a burst of taps produces a single frame.
      */
     fun takePicture()
+
+    /**
+     * Switch the camera into v0.7 "横屏多车" mode. Implementation should:
+     *   1. Re-bind the camera with a landscape orientation (1920x1080 or
+     *      whatever the device's back camera supports in landscape).
+     *   2. Use a higher resolution than the v0.6 single-plate mode
+     *      (which is 500px long edge) — small plates in a wide frame
+     *      need the full sensor to stay above the model's 30px minimum.
+     *   3. Subsequent [takePicture] calls in this mode return a JPEG
+     *      with the higher resolution; the caller is responsible for
+     *      asking the model to look for *all* plates, not the primary.
+     *
+     * Calling this twice is a no-op. Calling [switchToSingleMode] reverts.
+     */
+    fun switchToMultiPlateMode()
+
+    /**
+     * Revert to v0.6 single-plate vertical mode. Re-binds the camera with
+     * the lower resolution so the JPEG payload is small enough for the
+     * single-plate 500px-long-edge budget.
+     */
+    fun switchToSingleMode()
+
+    /**
+     * Current mode. Defaults to [Mode.SINGLE] (v0.6 behavior). Implementations
+     * update this on every successful [switchToMultiPlateMode] /
+     * [switchToSingleMode] call. Used by the UI to know whether to label
+     * the next capture as "wide-shot" or "single".
+     */
+    fun currentMode(): Mode
+
+    enum class Mode { SINGLE, MULTI }
 
     fun setOnFrameListener(listener: (ByteArray, Int, Int) -> Unit)
 

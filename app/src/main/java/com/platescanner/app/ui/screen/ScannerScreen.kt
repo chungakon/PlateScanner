@@ -1,7 +1,9 @@
 package com.platescanner.app.ui.screen
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CropLandscape
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.AlertDialog
@@ -168,6 +171,22 @@ fun ScannerScreen(
         }
     }
 
+    // v0.7: orientation flips when the user toggles the multi-plate mode.
+    // The activity-level request is the only reliable way to keep the
+    // camera preview landscape (PreviewView doesn't auto-rotate on its
+    // own — the user has to physically rotate the device, and that
+    // triggers a config change which we must handle gracefully).
+    val activity = LocalContext.current as? Activity
+    LaunchedEffect(uiState.captureMode) {
+        val target = when (uiState.captureMode) {
+            com.platescanner.app.camera.CameraController.Mode.MULTI ->
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            com.platescanner.app.camera.CameraController.Mode.SINGLE ->
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        activity?.requestedOrientation = target
+    }
+
     // Block-by-dialog state for the "missing API key" prompt. The dialog is
     // non-blocking on the camera preview — we just show a banner above the
     // HUD if the user dismissed it once. The user can always re-trigger via
@@ -211,6 +230,32 @@ fun ScannerScreen(
                     }
                 },
                 actions = {
+                    // v0.7 mode toggle. Switching here rotates the screen
+                    // and re-binds the camera at the new resolution.
+                    IconButton(onClick = {
+                        if (uiState.captureMode ==
+                            com.platescanner.app.camera.CameraController.Mode.MULTI) {
+                            viewModel.exitMultiPlateMode()
+                        } else {
+                            viewModel.enterMultiPlateMode()
+                        }
+                    }) {
+                        Icon(
+                            imageVector = Icons.Filled.CropLandscape,
+                            contentDescription = stringResource(
+                                if (uiState.captureMode ==
+                                    com.platescanner.app.camera.CameraController.Mode.MULTI
+                                ) R.string.scanner_multi_mode_exit
+                                else R.string.scanner_multi_mode_enter
+                            ),
+                            // Highlight when active so the user knows
+                            // they're in 横屏 mode.
+                            tint = if (uiState.captureMode ==
+                                com.platescanner.app.camera.CameraController.Mode.MULTI
+                            ) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(
                             Icons.Filled.Settings,
@@ -237,7 +282,14 @@ fun ScannerScreen(
                 lifecycleOwner = lifecycleOwner,
                 viewModel = viewModel,
                 uiState = uiState,
-                onTapToCapture = { viewModel.captureNow() },
+                onTapToCapture = {
+                    if (uiState.captureMode ==
+                        com.platescanner.app.camera.CameraController.Mode.MULTI) {
+                        viewModel.captureMulti()
+                    } else {
+                        viewModel.captureNow()
+                    }
+                },
             )
             Column(
                 modifier = Modifier
@@ -286,6 +338,23 @@ fun ScannerScreen(
                     openedAtMs = uiState.pendingOpenedAtMs,
                     onConfirm = { viewModel.confirmPending() },
                     onSkip = { viewModel.skipPending() },
+                )
+            }
+
+            // v0.7 wide-shot grid. Mutually exclusive with
+            // [pendingConfirmation] — the v0.7 ViewModel keeps them in
+            // separate state fields and only one can ever be non-null at
+            // a time (see ScannerViewModel.processFrame).
+            val multiPending = uiState.pendingMultiConfirm
+            if (multiPending.isNotEmpty()) {
+                MultiPlateConfirmDialog(
+                    candidates = multiPending,
+                    frameBytes = uiState.pendingMultiFrameBytes,
+                    openedAtMs = uiState.pendingMultiOpenedAtMs,
+                    onConfirm = { selected ->
+                        viewModel.confirmMultiSelected(selected)
+                    },
+                    onSkip = { viewModel.skipMulti() },
                 )
             }
         }
@@ -558,7 +627,15 @@ private fun CameraPreview(
                     )
                 }
             } else {
-                // Idle hint — the whole area is tappable.
+                // Idle hint — the whole area is tappable. Text differs
+                // between SINGLE and MULTI mode so the user always knows
+                // which mode they're in.
+                val isMulti = uiState.captureMode ==
+                    com.platescanner.app.camera.CameraController.Mode.MULTI
+                val hintText = androidx.compose.ui.res.stringResource(
+                    if (isMulti) R.string.scanner_multi_hint
+                    else R.string.scanner_single_hint,
+                )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -577,7 +654,7 @@ private fun CameraPreview(
                         modifier = Modifier.size(18.dp),
                     )
                     Text(
-                        text = "点击屏幕拍照识别",
+                        text = hintText,
                         color = Color.White,
                         style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                     )
